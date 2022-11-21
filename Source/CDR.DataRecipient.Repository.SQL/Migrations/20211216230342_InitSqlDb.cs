@@ -11,8 +11,8 @@ namespace CDR.DataRecipient.Repository.SQL.Migrations
                 name: "CdrArrangement",
                 columns: table => new
                 {
-                    CdrArrangementId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    ClientId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    CdrArrangementId = table.Column<string>(type: "nvarchar(64)", nullable: false),
+                    ClientId = table.Column<string>(type: "nvarchar(64)", nullable: false),
                     JsonDocument = table.Column<string>(type: "nvarchar(max)", nullable: true)
                 },
                 constraints: table =>

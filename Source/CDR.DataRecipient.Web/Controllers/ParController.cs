@@ -74,7 +74,7 @@ namespace CDR.DataRecipient.Web.Controllers
 
                     var stateKey = Guid.NewGuid().ToString();
                     var nonce = Guid.NewGuid().ToString();
-                    var redirectUri = model.RedirectUris;
+                    var redirectUri = sp.RedirectUri;
 
                     var authState = new AuthorisationState()
                     {

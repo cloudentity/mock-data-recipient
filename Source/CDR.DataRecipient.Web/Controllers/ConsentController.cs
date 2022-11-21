@@ -560,7 +560,8 @@ namespace CDR.DataRecipient.Web.Controllers
                 sp.SigningCertificate.X509Certificate,
                 arrangement.ClientId,
                 tokenType,
-                tokenType.Equals(SDK.Constants.TokenTypes.ACCESS_TOKEN, StringComparison.OrdinalIgnoreCase) ? arrangement.AccessToken : arrangement.RefreshToken);
+                tokenType.Equals(SDK.Constants.TokenTypes.ACCESS_TOKEN, StringComparison.OrdinalIgnoreCase) ? arrangement.AccessToken : arrangement.RefreshToken,
+                arrangement.AccessToken);
 
             return new ResponseModel()
             {
