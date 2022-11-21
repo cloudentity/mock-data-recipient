@@ -2,12 +2,15 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading.Tasks;
 using CDR.DataRecipient.SDK.Extensions;
 using CDR.DataRecipient.SDK.Models;
 using CDR.DataRecipient.SDK.Models.AuthorisationRequest;
 using CDR.DataRecipient.SDK.Services.Tokens;
+using Jose;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -21,27 +24,22 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
         public InfosecService(
             IConfiguration config,
             ILogger<InfosecService> logger,
-            IAccessTokenService accessTokenService) : base(config, logger)
+            IAccessTokenService accessTokenService,
+            IServiceConfiguration serviceConfiguration) : base(config, logger, serviceConfiguration)
         {
             _accessTokenService = accessTokenService;
         }
 
-        public async Task<Response<OidcDiscovery>> GetOidcDiscovery(string infosecBaseUri)
+        public async Task<Response<OidcDiscovery>> GetOidcDiscovery(
+            string infosecBaseUri)
         {
             var oidcResponse = new Response<OidcDiscovery>();
 
             _logger.LogDebug($"Request received to {nameof(InfosecService)}.{nameof(GetOidcDiscovery)}.");
 
-            var clientHandler = new HttpClientHandler()
-            {
-                AutomaticDecompression = DecompressionMethods.GZip
-            };
-            
-            clientHandler.ServerCertificateCustomValidationCallback += (sender, cert, chain, sslPolicyErrors) => true;
-            var client = new HttpClient(clientHandler);
-
+            var client = GetHttpClient();
             var configUrl = string.Concat(infosecBaseUri.TrimEnd('/'), "/.well-known/openid-configuration");
-            var configResponse = await client.GetAsync(configUrl);
+            var configResponse = await client.GetAsync(EnsureValidEndpoint(configUrl));
 
             oidcResponse.StatusCode = configResponse.StatusCode;
 
@@ -59,8 +57,7 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             X509Certificate2 clientCertificate,
             X509Certificate2 signingCertificate,
             string clientId,
-            string request,
-            string scope)
+            string request)
         {
             var parResponse = new Response<PushedAuthorisation>();
 
@@ -71,14 +68,13 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
 
             var formFields = new Dictionary<string, string>();
             formFields.Add("request", request);
-            formFields.Add("response_type", "code id_token");
 
             var response = await client.SendPrivateKeyJwtRequest(
                 parEndpoint,
-                clientId,
                 signingCertificate,
-                scope: scope,
-                additionalFormFields: formFields);
+                issuer: clientId,
+                additionalFormFields: formFields,
+                enforceHttpsEndpoint: _serviceConfiguration.EnforceHttpsEndpoints);
 
             var body = await response.Content.ReadAsStringAsync();
 
@@ -105,7 +101,8 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             X509Certificate2 signingCertificate,
             int? sharingDuration = 0,
             string cdrArrangementId = null,
-            string responseMode = "form_post")
+            string responseMode = "form_post",
+            Pkce pkce = null)
         {
             _logger.LogDebug($"Request received to {nameof(InfosecService)}.{nameof(BuildAuthorisationRequestJwt)}.");
 
@@ -125,6 +122,12 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
                 { "claims", new AuthorisationRequestClaims() { sharing_duration = sharingDuration, cdr_arrangement_id = cdrArrangementId } }
             };
 
+            if (pkce != null)
+            {
+                authorisationRequestClaims.Add("code_challenge", pkce.CodeChallenge);
+                authorisationRequestClaims.Add("code_challenge_method", pkce.CodeChallengeMethod);
+            }
+
             return authorisationRequestClaims.GenerateJwt(clientId, infosecBaseUri, signingCertificate);
         }
 
@@ -136,38 +139,41 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             string state,
             string nonce,
             X509Certificate2 signingCertificate,
-            int? sharingDuration = 0)
+            int? sharingDuration = 0,
+            Pkce pkce = null)
         {
             _logger.LogDebug($"Request received to {nameof(InfosecService)}.{nameof(BuildAuthorisationRequestUri)}.");
 
-            var jwt = BuildAuthorisationRequestJwt(infosecBaseUri, clientId, redirectUri, scope, state, nonce, signingCertificate, sharingDuration);
+            var jwt = BuildAuthorisationRequestJwt(infosecBaseUri, clientId, redirectUri, scope, state, nonce, signingCertificate, sharingDuration, pkce: pkce);
             var config = (await GetOidcDiscovery(infosecBaseUri)).Data;
 
-            return config.AuthorizationEndpoint
+            var authRequestUri = config.AuthorizationEndpoint
                 .AppendQueryString("client_id", clientId)
-                .AppendQueryString("response_type", "code id_token")
                 .AppendQueryString("scope", scope)
-                .AppendQueryString("response_mode", "form_post")
+                .AppendQueryString("response_type", "code id_token")
                 .AppendQueryString("request", jwt);
+
+            return authRequestUri;
         }
 
         public async Task<string> BuildAuthorisationRequestUri(
             string infosecBaseUri,
             string clientId,
             X509Certificate2 signingCertificate,
-            string scope,
-            string requestUri)
+            string requestUri,
+            string scope)
         {
             _logger.LogDebug($"Request received to {nameof(InfosecService)}.{nameof(BuildAuthorisationRequestUri)}.");
 
             var config = (await GetOidcDiscovery(infosecBaseUri)).Data;
 
-            return config.AuthorizationEndpoint
+            string authRequestUri = config.AuthorizationEndpoint
                 .AppendQueryString("client_id", clientId)
-                .AppendQueryString("response_type", "code id_token")
                 .AppendQueryString("scope", scope)
-                .AppendQueryString("response_mode", "form_post")
+                .AppendQueryString("response_type", "code id_token")
                 .AppendQueryString("request_uri", requestUri);
+
+            return authRequestUri;
         }
 
         public async Task<Response<Token>> GetAccessToken(
@@ -178,11 +184,21 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             string scope = Constants.Scopes.CDR_DYNAMIC_CLIENT_REGISTRATION,
             string redirectUri = null,
             string code = null,
-            string grantType = Constants.GrantTypes.CLIENT_CREDENTIALS)
+            string grantType = Constants.GrantTypes.CLIENT_CREDENTIALS,
+            Pkce pkce = null)
         {
             _logger.LogDebug($"Request received to {nameof(InfosecService)}.{nameof(GetAccessToken)}.");
 
-            return await _accessTokenService.GetAccessToken(tokenEndpoint, clientId, clientCertificate, signingCertificate, scope, redirectUri, code, grantType);
+            return await _accessTokenService.GetAccessToken(
+                tokenEndpoint, 
+                clientId, 
+                clientCertificate, 
+                signingCertificate, 
+                scope, 
+                redirectUri, 
+                code, 
+                grantType,
+                pkce);
         }
 
         public async Task<Response<Token>> RefreshAccessToken(
@@ -207,11 +223,13 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
 
             var response = await client.SendPrivateKeyJwtRequest(
                 tokenEndpoint,
-                clientId,
                 signingCertificate,
+                issuer: clientId,
+                clientId: clientId,
                 scope: scope,
                 grantType: "refresh_token",
-                additionalFormFields: formFields);
+                additionalFormFields: formFields,
+                enforceHttpsEndpoint: _serviceConfiguration.EnforceHttpsEndpoints);
 
             var body = await response.Content.ReadAsStringAsync();
 
@@ -250,10 +268,12 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
 
             var response = await client.SendPrivateKeyJwtRequest(
                 tokenRevocationEndpoint,
-                clientId,
                 signingCertificate,
-                "",
-                additionalFormFields: formFields);
+                issuer: clientId,
+                clientId: clientId,
+                scope: "",
+                additionalFormFields: formFields,
+                enforceHttpsEndpoint: _serviceConfiguration.EnforceHttpsEndpoints);
 
             var body = await response.Content.ReadAsStringAsync();
 
@@ -288,10 +308,12 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
 
             var response = await client.SendPrivateKeyJwtRequest(
                 introspectionEndpoint,
-                clientId,
                 signingCertificate,
-                "",
-                additionalFormFields: formFields);
+                issuer: clientId,
+                clientId: clientId,
+                scope: "",
+                additionalFormFields: formFields,
+                enforceHttpsEndpoint: _serviceConfiguration.EnforceHttpsEndpoints);
 
             var body = await response.Content.ReadAsStringAsync();
 
@@ -309,7 +331,10 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             return introspectionResponse;
         }
 
-        public async Task<Response<Models.UserInfo>> UserInfo(string userInfoEndpoint, X509Certificate2 clientCertificate, string accessToken)
+        public async Task<Response<Models.UserInfo>> UserInfo(
+            string userInfoEndpoint, 
+            X509Certificate2 clientCertificate, 
+            string accessToken)
         {
             var userInfoResponse = new Response<Models.UserInfo>();
 
@@ -318,7 +343,7 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             // Setup the http client.
             var client = GetHttpClient(clientCertificate, accessToken);
 
-            var response = await client.GetAsync(userInfoEndpoint);
+            var response = await client.GetAsync(EnsureValidEndpoint(userInfoEndpoint));
             var body = await response.Content.ReadAsStringAsync();
 
             userInfoResponse.StatusCode = response.StatusCode;
@@ -355,10 +380,12 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
 
             var response = await client.SendPrivateKeyJwtRequest(
                 cdrArrangementRevocationEndpoint,
-                clientId,
                 signingCertificate,
-                "",
-                additionalFormFields: formFields);
+                issuer: clientId,
+                clientId: clientId,
+                scope: "",
+                additionalFormFields: formFields,
+                enforceHttpsEndpoint: _serviceConfiguration.EnforceHttpsEndpoints);
 
             var body = await response.Content.ReadAsStringAsync();
 
@@ -372,7 +399,10 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             return revocationResponse;
         }
 
-        public async Task<Response<Models.UserInfo>> PushedAuthorizationRequest(string parEndpoint, X509Certificate2 clientCertificate, string accessToken)
+        public async Task<Response<Models.UserInfo>> PushedAuthorizationRequest(
+            string parEndpoint, 
+            X509Certificate2 clientCertificate, 
+            string accessToken)
         {
             var parResponse = new Response<Models.UserInfo>();
 
@@ -381,7 +411,7 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             // Setup the http client.
             var client = GetHttpClient(clientCertificate, accessToken);
 
-            var response = await client.GetAsync(parEndpoint);
+            var response = await client.GetAsync(EnsureValidEndpoint(parEndpoint));
             var body = await response.Content.ReadAsStringAsync();
 
             parResponse.StatusCode = response.StatusCode;
@@ -396,6 +426,22 @@ namespace CDR.DataRecipient.SDK.Services.DataHolder
             }
 
             return parResponse;
+        }
+
+        public Pkce CreatePkceData()
+        {
+            var pkce = new Pkce
+            {
+                CodeVerifier = string.Concat(System.Guid.NewGuid().ToString(), '-', System.Guid.NewGuid().ToString())
+            };
+
+            using (var sha256 = SHA256.Create())
+            {
+                var challengeBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(pkce.CodeVerifier));
+                pkce.CodeChallenge = Base64Url.Encode(challengeBytes);
+            }
+
+            return pkce;
         }
     }
 }

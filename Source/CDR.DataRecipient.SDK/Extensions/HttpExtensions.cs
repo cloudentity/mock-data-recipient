@@ -1,10 +1,12 @@
-﻿using System;
+﻿using CDR.DataRecipient.SDK.Models;
+using CDR.DataRecipient.SDK.Register;
+using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
+using System.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
-using CDR.DataRecipient.SDK.Register;
 
 namespace CDR.DataRecipient.SDK.Extensions
 {
@@ -27,23 +29,36 @@ namespace CDR.DataRecipient.SDK.Extensions
         }
 
         public static async Task<HttpResponseMessage> SendPrivateKeyJwtRequest(
-            this HttpClient client, 
-            string url, 
-            string clientId, 
+            this HttpClient client,
+            string url,
             X509Certificate2 signingCertificate,
-            string scope,
+            string issuer,
+            string clientId = null,
+            string scope = null,
             string redirectUri = null,
-            string code = null, 
-            string grantType = Constants.GrantTypes.CLIENT_CREDENTIALS,
-            IDictionary<string, string> additionalFormFields = null)
+            string code = null,
+            string grantType = null,
+            IDictionary<string, string> additionalFormFields = null,
+            Pkce pkce = null,
+            bool enforceHttpsEndpoint = true)
         {
             var privateKeyJwt = new PrivateKeyJwt(signingCertificate);
 
             var formFields = new List<KeyValuePair<string, string>>();
-            formFields.Add(new KeyValuePair<string, string>("grant_type", grantType));
-            formFields.Add(new KeyValuePair<string, string>("client_id", clientId));
             formFields.Add(new KeyValuePair<string, string>("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"));
-            formFields.Add(new KeyValuePair<string, string>("client_assertion", privateKeyJwt.Generate(clientId, url)));
+            formFields.Add(new KeyValuePair<string, string>("client_assertion", privateKeyJwt.Generate(issuer, url)));
+
+            // Client ID is only required for Token endpoint requests.
+            if (!string.IsNullOrEmpty(clientId))
+            {
+                formFields.Add(new KeyValuePair<string, string>("client_id", clientId));
+            }
+
+            // Grant type is only required for Token endpoint requests.
+            if (!string.IsNullOrEmpty(grantType))
+            {
+                formFields.Add(new KeyValuePair<string, string>("grant_type", grantType));
+            }
 
             if (!string.IsNullOrEmpty(scope))
             {
@@ -60,6 +75,11 @@ namespace CDR.DataRecipient.SDK.Extensions
                 formFields.Add(new KeyValuePair<string, string>("code", code));
             }
 
+            if (pkce != null && !string.IsNullOrEmpty(pkce.CodeVerifier))
+            {
+                formFields.Add(new KeyValuePair<string, string>("code_verifier", pkce.CodeVerifier));
+            }
+
             if (additionalFormFields != null)
             {
                 foreach (var field in additionalFormFields)
@@ -70,7 +90,7 @@ namespace CDR.DataRecipient.SDK.Extensions
 
             var clientAssertionContent = new FormUrlEncodedContent(formFields);
 
-            return await client.PostAsync(url, clientAssertionContent);
+            return await client.PostAsync(url.ValidateEndpoint(enforceHttpsEndpoint), clientAssertionContent);
         }
     }
 }
