@@ -2,7 +2,7 @@
 
 Certificates play an important part in the CDR ecosystem to establish trust between participants and protect communications.  **DigiCert** is the Certificate Authority (CA) for the CDR and the ACCC is responsible for provisioning DigiCert certificates to participants during the on-boarding process.
 
-For more information, consult the [Certificate Management](https://cdr-register.github.io/register/#certificate-management) section of the Register Design.
+For more information, consult the [Certificate Management](https://consumerdatastandardsaustralia.github.io/standards/#certificate-management) section of the Consumer Data Standards.
 
 The Mock Data Recipient will mimic the behaviour of a data recipient in the CDR ecosystem and therefore will use certificates in its interactions.  However, the use of DigiCert for this purpose is not feasible or scalable so an alternative approach is adopted.
 
@@ -27,7 +27,7 @@ Consult the [CertificateManagement](https://github.com/ConsumerDataRight/mock-re
 
 Endpoints that are not protected by mTLS are protected by TLS.  The server certificate used for TLS communication can be provisioned by the CDR CA, or alternatively participants can used a trusted third party CA.
 
-For the Mock Data Recipient, a self-signed TLS certificate is used.  The self-signed certificate will not use the Mock CDR CA, like the mTLS certificates do.
+For the Mock Data Recipient, a self-signed TLS certificate is used.  The self-signed certificate is issued by the Mock CDR CA, like the mTLS certificates are.
 
 The TLS certificate for the Mock Data Recipient is available at `tls\mock-data-recipient.pfx` and has the password of `#M0ckDataRecipient#`.
 
